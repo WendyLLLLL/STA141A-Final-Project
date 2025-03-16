@@ -1,0 +1,338 @@
+---
+title: "STA 141A Final Report"
+author: "Wenxin Li 919425682"
+output: html_document
+---
+
+## Predicting Behavioral Outcomes from Mouse Neural Recordings
+### Abstract
+Here we study neural spike-train data from mice engaged in a visual decision-making task, using published data from Steinmetz et al. (2019). We present an exploratory analysis to characterize the activity of neurons in visual cortex during presentation of the stimulus, number of sessions to build with (local temporal PCA) to pool across multiple sessions during training, and finally a logistic regression model to predict success vs failure (outcome) of stimulus presentation across trials. As a result, we measure test accuracy of approximately 70% on different held-out data from Session 1 and Session 18. These findings demonstrate that single-neuron firing rates as well as visual stimulus contrasts encode informative signals for predicting behavioral responses, but that there is still potential for optimization through more sophisticated modeling techniques.
+
+### Section 1. Introduction
+The key question is whether neural activity recorded from the visual cortex of the mice can predict behavioral outcome (i.e., success and failure) with high fidelity. This is motivated by a general interest in how cortical signals mirror sensory processing and decision making in rodents.
+
+The data are from experiments in which 10 mice learned a visual discrimination task across multiple sessions, as detailed by Steinmetz et al. (2019). Each trial consists of showing different contrasts of the stimulus on two screens (left and right and the mouse must turn a wheel (or not) to indicate its choice.
+
+The primary variables are: (1) feedback_type (success or failure), (2) contrast_left and contrast_right (contrasts in {0,0.25,0.5,1}), and (3) spike-train counts of neurons in visual cortex from stimulus onset to 0.4s post-onset. Our goal is to link neuronal activity and stimulus conditions to the resulting behavioral outcome.
+
+We then provide an exploratory analysis of this data, a description of how we combined data across sessions, and a predictive model incorporating PCA features of the spike trains and stimulus contrasts to predict the outcome of a trial.
+
+### Section 2. Exploratory Analysis
+We started by evaluating things on a per-session basis in order to collect high-level statistics: trial counts, neuron counts, distribution of feedback values, and the range of left/right contrasts. We saw that each mouse (n = 8) underwent a different number of sessions (ranging between 3 and 7) and that in average, sessions contained in excess of one hundred trials.
+
+Univariate summaries revealed success rates of between approximately 63% and 76% across mice, suggesting that different mice achieved different overall performance levels. We further visualized the distribution of total spikes per trial by each neuron, noting that while some neurons were entirely silent others had large firing rates.
+
+Finally we investigated cross-session variability. Mice such as “Lederberg” achieved much higher average success rates, indicating that some individuals may be predisposed to training effects or show baseline differences in performance. The evidence caused us to favor approaches (e.g., PCA) that reduce dimensionality while retaining the cross-session patterns.
+
+### Section 3. Data Integration
+The trials of several sessions and mice can be pooled together as all trials were aligned into a single data structure, named df_integrated. For each trial, we used (i) the session ID and mouse name, (ii) stimulus contrasts, (iii) the type of feedback, and (iv) principal-component features derived from spike matrices. In particular, for each trial, we computed the average of each neuron’s spike counts over the 0.4s post-stimulus period that corresponds to the “mean_neuron” features. We then apply PCA to these features — on a session by session basis or on pooled data (according to each session dimensionality). For sessions with fewer neurons or columns with zero variance, we kept simpler features.
+
+Furthermore, by filtering out the higher-dimensional space, where variance is the least, this approach deals with possible contamination by potential differences across sessions (e.g., different baselines, small changes in firing; see below) on a session level since the low-dimensional principal components represent the space which preserves the highest variance in the neural response. These are performed on the constant/ zero-variance columns we excluded earlier to prevent the PCA from suffering from singularities.
+
+This integration step resulted in a table with principal-component (PC1.. PC10), and three original contrast features. This unified representation enabled us to “borrow strength” between sessions to create a more robust predictive model.
+
+### Section 4. Predictive Modeling
+We used a logistic regression model to predict the binary outcome “success/failure”. Up to ten PCA features (PC1.. PC10) as predictors in addition to the left and right contrast values. Judging the relevance of principal components that will be high, we assumed that these higher principal components might correlate with relevant neural firing patterns that code up sensory information and decision-relevant signals. Logistic regression interprets each predictor’s contribution to a linear combination in log-odds space.
+
+Training set: Model fitting was performed on the combined training set comprised of all trials from sessions 2–17 as well as those trials from sessions 1 and 18 not sampled in the testing subset. From the summary of coefficient estimates (see above), we observed significant association with outcome for some PCA position, for some PCA position (eg PC2, PC4, PC5, PC8, PC10). The model assumes that there is a linear relationship in log-odds for each principal component, and also independence across trials. Though these assumptions are grossly simplified for real neural data, they provide a basis for investigating the predictive power of the PCA features.
+
+### Section 5. Prediction Performance on the Test Sets
+We drew random samples of 100 trials from each of Session 1 and Session 18 to constitute a set of 200 trials for testing.) The model performed about 70% accurate on these hold-out trials: the confusion matrix showed 60 failures that were classified as success, and 140 successes that the model correctly identified. While 70% is a moderate amount of accuracy, it does suggest that neural activity in combination with contrast information captures some of the decision process. More complex models (e.g. random forests or neural networks) or more features may also yield better results.
+
+### Section 6. Discussion
+Our analysis shows that neural activity in the mouse visual cortex contain meaningful signals for predicting the outcome of trials in a contrast-based decision task. Given these variations between mice and the sessions in which they were recorded, it was further revealed via exploratory analysis that integration methods such as PCA, as shown, could greatly determine performance.
+
+From the high-dimensional representation (spike matrix), we captured dominant firing patterns while reducing session-specific noise through projection into a smaller dimensionality using principal components. Logistic regression offered an interpretable means to map these components (and contrast cues) to behavior.
+
+Limitations include the possibility of oversimplifying neural dynamics (e.g. not accounting for temporal changes within the 0.4s window), lack of robust validation across alternative models and the assumption that each trial is independent. In successive work, more complex feature extraction algorithms (e.g., deep learning) and the addition of time-series modeling of the spike pairs could be explored. This project generally shows that by combining multi-session neural data and applying a suitably selected predictive model gives insights into the relationships between cortical firing patterns, stimulus contrasts, and behavioral outcomes. The findings could inform future research on the ways that neural circuits encode perceptual decisions in mice.
+
+```{r}
+
+# Part 1
+
+library(dplyr)
+library(ggplot2)
+
+session <- list()
+for(i in 1:18) {
+  session[[i]] <- readRDS(paste0("./sessions/session", i, ".rds"))
+}
+
+df_summary <- data.frame()
+
+for (i in 1:18) {
+  s          <- session[[i]]
+  n_trials   <- length(s$spks)          
+  
+  n_neurons  <- nrow(s$spks[[1]])        
+  
+  mouse_name <- s$mouse_name      
+  date_exp   <- s$date_exp        
+  
+  feedback_dist <- table(s$feedback_type)
+  feedback_success <- sum(s$feedback_type == 1)
+  feedback_failure <- sum(s$feedback_type == -1)
+  
+  contrast_pairs <- paste(s$contrast_left, s$contrast_right, sep = "_")
+  contrast_table <- table(contrast_pairs)
+
+  df_summary <- rbind(
+    df_summary,
+    data.frame(
+      session           = i,
+      mouse             = mouse_name,
+      date              = date_exp,
+      n_trials          = n_trials,
+      n_neurons         = n_neurons,
+      feedback_success  = feedback_success,
+      feedback_failure  = feedback_failure
+    )
+  )
+}
+
+df_summary
+
+df_summary$success_rate <- df_summary$feedback_success / df_summary$n_trials
+
+df_summary %>%
+  select(session, mouse, date, success_rate) %>%
+  arrange(mouse, session)
+
+ggplot(df_summary, aes(x = session, y = success_rate, color = mouse)) +
+  geom_point(size = 3) +
+  geom_line(aes(group = mouse)) +
+  theme_minimal() +
+  labs(
+    title = "Session Success Prob",
+    x     = "Session No",
+    y     = "Success Rate"
+  )
+
+i_sess  <- 5
+i_trial <- 11
+
+spike_mat <- session[[i_sess]]$spks[[i_trial]]  
+time_bins <- session[[i_sess]]$time[[i_trial]]
+
+total_spikes_per_neuron <- rowSums(spike_mat)
+
+plot(
+  total_spikes_per_neuron,
+  main = paste("Session", i_sess, "Trial", i_trial, "- Total"),
+  xlab = "No",
+  ylab = "Total",
+  pch  = 16
+)
+
+avg_spikes_by_time <- colMeans(spike_mat)
+
+plot(
+  time_bins, avg_spikes_by_time, type = "b",
+  main = paste("Session", i_sess, "Trial", i_trial, "- Avg of bins"),
+  xlab = "Time (s)",
+  ylab = "Avg"
+)
+
+heatmap_spike_mat <- spike_mat
+image(t(heatmap_spike_mat), 
+      main = "Map (Session 5, Trial 11)",
+      xlab = "Time bins",
+      ylab = "Neurons",
+      col = heat.colors(50))
+
+
+s5 <- session[[5]]
+n_trials_s5 <- length(s5$spks)
+
+total_spike_each_trial <- sapply(s5$spks, function(mat) sum(mat))
+
+feedback_s5 <- s5$feedback_type  
+
+plot(
+  total_spike_each_trial, type = "b",
+  main = "Session 5: Total trial",
+  xlab = "Trial No", ylab = "Total"
+)
+
+plot(
+  total_spike_each_trial,
+  col = ifelse(feedback_s5 == 1, "blue", "red"),
+  pch = 16, 
+  main = "Session 5",
+  xlab = "Trial No",
+  ylab = "Total"
+)
+legend(
+  "topleft",
+  legend = c("Success (1)", "Failure (-1)"),
+  col    = c("blue", "red"),
+  pch    = 16
+)
+
+df_mouse <- df_summary %>%
+  group_by(mouse) %>%
+  summarise(
+    total_sessions   = n(),
+    mean_successrate = mean(success_rate),
+    total_trials     = sum(n_trials)
+  )
+
+df_mouse
+
+```
+
+```{r}
+# Part 2: Data Integration
+
+library(dplyr)
+
+session <- list()
+for(i in 1:18){
+  session[[i]] <- readRDS(paste0("./sessions/session", i, ".rds"))
+}
+extract_features_from_trial <- function(spike_mat, method = "mean_neuron") {
+  if(method == "sum") {
+    return(sum(spike_mat))
+  } else if(method == "mean_neuron") {
+    return(rowMeans(spike_mat))
+  } else if(method == "mean_time") {
+    return(colMeans(spike_mat))
+  } else {
+    stop("Undefined method in extract_features_from_trial()!")
+  }
+}
+
+all_sessions_data <- list()  
+
+for(i in 1:18) {
+  
+  s <- session[[i]]
+  
+  n_trials <- length(s$spks)
+  mouse_name     <- s$mouse_name
+  feedback_types <- s$feedback_type
+  contrast_left  <- s$contrast_left
+  contrast_right <- s$contrast_right
+  
+
+  trial_features_mat <- do.call(
+    rbind,
+    lapply(s$spks, function(spike_mat) {
+      extract_features_from_trial(spike_mat, method = "mean_neuron")
+    })
+  )
+
+  sd_cols <- apply(trial_features_mat, 2, sd)
+  zero_var_cols <- which(sd_cols == 0)
+  if(length(zero_var_cols) > 0) {
+    trial_features_mat <- trial_features_mat[, -zero_var_cols, drop=FALSE]
+  }
+  
+  n_features <- ncol(trial_features_mat)
+  
+  if(n_features < 2) {
+    simple_feat <- apply(s$spks %>% purrr::map(~ .x), 1, sum)
+    if(n_features == 1) {
+      final_feature <- trial_features_mat[,1]
+    } else {
+      final_feature <- rep(0, n_trials)
+    }
+    
+    tmp_df <- data.frame(
+      session_id     = i,
+      trial_id       = 1:n_trials,
+      mouse_name     = mouse_name,
+      feedback_type  = feedback_types,
+      contrast_left  = contrast_left,
+      contrast_right = contrast_right,
+      Feature1       = final_feature
+    )
+    
+  } else {
+    trial_features_mat_scaled <- scale(trial_features_mat, center = TRUE, scale = FALSE)
+    pca_result <- prcomp(trial_features_mat_scaled, center = FALSE, scale. = FALSE)
+    
+    ndims <- min(10, n_features)
+    trial_pca_scores <- pca_result$x[, 1:ndims, drop = FALSE]
+    
+    tmp_df <- data.frame(
+      session_id     = i,
+      trial_id       = 1:n_trials,
+      mouse_name     = mouse_name,
+      feedback_type  = feedback_types,
+      contrast_left  = contrast_left,
+      contrast_right = contrast_right
+    )
+    pc_df <- as.data.frame(trial_pca_scores)
+    colnames(pc_df) <- paste0("PC", 1:ndims)
+    tmp_df <- cbind(tmp_df, pc_df)
+  }
+  
+  all_sessions_data[[i]] <- tmp_df
+}
+
+df_integrated <- dplyr::bind_rows(all_sessions_data)
+
+head(df_integrated)
+
+colnames(df_integrated)
+
+```
+
+```{r}
+# Part 3: Model Training and Prediction
+df_integrated$feedback_factor <- ifelse(df_integrated$feedback_type == 1,
+                                        "success", "failure")
+df_integrated$feedback_factor <- factor(df_integrated$feedback_factor, 
+                                        levels = c("failure","success"))
+
+pca_cols <- grep("^PC\\d+$", colnames(df_integrated), value = TRUE)
+feature_cols <- c(pca_cols, "contrast_left", "contrast_right")
+
+if(length(pca_cols) == 0 && "Feature1" %in% colnames(df_integrated)){
+  feature_cols <- c("Feature1", "contrast_left", "contrast_right")
+}
+
+df_model <- df_integrated %>%
+  dplyr::select(session_id, feedback_factor, dplyr::all_of(feature_cols)) %>%
+  na.omit()
+
+df_sess1 <- df_model %>% filter(session_id == 1)
+df_sess18 <- df_model %>% filter(session_id == 18)
+
+set.seed(123)
+test_size_1 <- min(nrow(df_sess1), 100)
+test_idx_1 <- sample(seq_len(nrow(df_sess1)), size = test_size_1)
+test_sess1 <- df_sess1[test_idx_1, ]
+train_sess1 <- df_sess1[-test_idx_1, ]
+
+set.seed(456)
+test_size_18 <- min(nrow(df_sess18), 100)
+test_idx_18 <- sample(seq_len(nrow(df_sess18)), size = test_size_18)
+test_sess18 <- df_sess18[test_idx_18, ]
+train_sess18 <- df_sess18[-test_idx_18, ]
+
+train_others <- df_model %>% filter(!(session_id %in% c(1, 18)))
+
+train_data <- dplyr::bind_rows(train_sess1, train_sess18, train_others)
+test_data  <- dplyr::bind_rows(test_sess1, test_sess18)
+
+model_formula <- as.formula(
+  paste("feedback_factor ~", paste(feature_cols, collapse = " + "))
+)
+
+fit_glm <- glm(model_formula, data = train_data, family = binomial())
+summary(fit_glm)
+
+pred_prob <- predict(fit_glm, newdata = test_data, type = "response")
+pred_label <- ifelse(pred_prob >= 0.5, "success", "failure")
+pred_label <- factor(pred_label, levels = c("failure","success"))
+
+true_label <- test_data$feedback_factor
+accuracy <- mean(pred_label == true_label)
+cat("\nTest Accuracy:", accuracy, "\n")
+
+table(Predicted = pred_label, Actual = true_label)
+
+```
+
